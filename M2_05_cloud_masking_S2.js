@@ -9,48 +9,119 @@ var aoi = ee.Geometry.Polygon(
 Map.centerObject(aoi, 11);
 
 // ============================================================
-// METHOD 1: QA60 bit masking
+// METHOD 1: QA60 bit masking (works on L1C and SR)
 // ============================================================
-// The QA60 band encodes cloud flags as bits.
-// Pixels with QA60 >= 1024 have at least one cloud bit set.
+// QA60 is a 16-bit band. Two bits indicate clouds:
+//   Bit 10 = opaque cloud
+//   Bit 11 = cirrus cloud
+// A value >= 1024 means at least one cloud bit is set.
 
-// TODO: Write a maskQA60 function that:
-//       - Selects the QA60 band
-//       - Keeps pixels where QA60 < 1024
-//       - Scales DN to reflectance by dividing by 10000
-//       - Preserves 'system:time_start' with .copyProperties()
+function maskQA60(image) {
+  var qa   = image.select('QA60');
+  // Keep pixels where QA60 < 1024 (both cloud bits are 0).
+  var mask = qa.lt(1024);
+  return image.updateMask(mask)
+              .divide(10000)   // scale DN to reflectance [0–1]
+              .copyProperties(image, ['system:time_start']);
+}
 
+var col_qa60 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(aoi)
+  .filterDate('2021-06-01', '2021-09-01')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+  .map(maskQA60);
 
-// TODO: Apply maskQA60 to a 2021 Jun–Sep S2_SR collection
-//       filtered to the AOI with CLOUDY_PIXEL_PERCENTAGE < 30.
-//       Display the median composite as RGB.
-
+Map.addLayer(col_qa60.median(), {bands:['B4','B3','B2'], min:0, max:0.3},
+             'QA60 masked composite');
 
 // ============================================================
-// METHOD 2: SCL (Scene Classification Layer)
+// METHOD 2: SCL — Scene Classification Layer (SR only)
 // ============================================================
-// SCL classes: 4=vegetation, 5=bare, 6=water, 11=snow are clear.
-// Classes 3, 8, 9, 10 are cloud shadow/cloud/cirrus — mask these.
+// SCL assigns each pixel a land cover / cloud class:
+//   1 = saturated / defective
+//   2 = dark area / cast shadow
+//   3 = cloud shadow
+//   4 = vegetation
+//   5 = not-vegetated
+//   6 = water
+//   7 = unclassified
+//   8 = cloud (medium probability)
+//   9 = cloud (high probability)
+//   10 = thin cirrus
+//   11 = snow / ice
+//
+// Keep only classes 4, 5, 6, 11 (clear land + water + snow).
+// Exclude: 1, 2, 3, 7, 8, 9, 10.
 
-// TODO: Write a maskSCL function using the SCL band.
-//       Keep only classes 4, 5, 6, 11.
-//       Apply it and display the result.
+function maskSCL(image) {
+  var scl  = image.select('SCL');
+  // Valid pixels: vegetation(4), bare(5), water(6), snow(11).
+  var mask = scl.eq(4).or(scl.eq(5)).or(scl.eq(6)).or(scl.eq(11));
+  return image.updateMask(mask)
+              .divide(10000)
+              .copyProperties(image, ['system:time_start']);
+}
 
+var col_scl = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(aoi)
+  .filterDate('2021-06-01', '2021-09-01')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30))
+  .map(maskSCL);
 
-// TODO: Display the raw SCL band of one clear scene to see the
-//       classification. Sort by CLOUDY_PIXEL_PERCENTAGE and take .first().
+Map.addLayer(col_scl.median(), {bands:['B4','B3','B2'], min:0, max:0.3},
+             'SCL masked composite');
 
+// Display the raw SCL of one image for inspection.
+var oneImage = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(aoi).filterDate('2021-07-01','2021-07-31')
+  .sort('CLOUDY_PIXEL_PERCENTAGE').first();
+Map.addLayer(oneImage.select('SCL'),
+  {min:1, max:11, palette:['red','black','brown','green','tan','blue',
+                            'grey','silver','white','cyan','lightblue']},
+  'SCL layer (one image)');
 
 // ============================================================
 // METHOD 3: s2cloudless cloud probability
 // ============================================================
-// Collection: 'COPERNICUS/S2_CLOUD_PROBABILITY' (separate from S2_SR)
-// Join it to the SR collection on 'system:index'.
+// 'COPERNICUS/S2_CLOUD_PROBABILITY' is a separate collection
+// that provides a per-pixel cloud probability (0–100%).
+// Join it to the SR collection to use it as a mask.
+// This is the most accurate approach for difficult scenes.
 
-// TODO: Load both collections, join them using ee.Join.saveFirst(),
-//       and write a masking function that uses cloud probability < 35%.
-//       Display the masked median composite.
+var s2Sr  = ee.ImageCollection('COPERNICUS/S2_SR')
+  .filterBounds(aoi)
+  .filterDate('2021-06-01', '2021-09-01')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 30));
 
+var s2Clouds = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY')
+  .filterBounds(aoi)
+  .filterDate('2021-06-01', '2021-09-01');
+
+// Join cloud probability to SR collection by system:index.
+var joinCondition = ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'});
+var joined = ee.ImageCollection(
+  ee.Join.saveFirst('cloud_prob').apply(s2Sr, s2Clouds, joinCondition)
+);
+
+var MAX_CLOUD_PROB = 35;  // % — pixels above this are masked
+
+function maskCloudProb(image) {
+  var cloudProb = ee.Image(image.get('cloud_prob')).select('probability');
+  var mask      = cloudProb.lt(MAX_CLOUD_PROB);
+  return image.updateMask(mask)
+              .divide(10000)
+              .copyProperties(image, ['system:time_start']);
+}
+
+var col_prob = joined.map(maskCloudProb);
+Map.addLayer(col_prob.median(), {bands:['B4','B3','B2'], min:0, max:0.3},
+             's2cloudless masked composite');
+
+// ============================================================
+// COMPARISON: Print scene counts
+// ============================================================
+print('Input scenes:', s2Sr.size());
+print('Method comparison — all three composites are now shown on the map.');
 
 // QUESTION: Compare the three composites visually.
 //           Which method removes the most cloud contamination?
