@@ -1,5 +1,5 @@
 // =============================================================
-// 03 - Hello Image: Loading and Displaying a Single Image
+// M1 04 - Hello Image: Loading and Displaying a Single Image 
 // =============================================================
 // Key concepts:
 //   ee.Image       – a single raster image (one or many bands)
@@ -7,23 +7,16 @@
 //   Map.addLayer() – display a layer in the map panel
 //   print()        – inspect the image metadata in the Console
 
-/**** Start of imports. If edited, may not auto-convert in the playground. ****/
-var geometry =
-    ee.Geometry.Polygon(
-        [[[107.46582044315535, 16.547334521756277],
-          [107.46582044315535, 16.39720487771517],
-          [107.7102662439366,  16.39720487771517],
-          [107.7102662439366,  16.547334521756277]]], null, false);
-/***** End of imports. *****/
+
 
 // TODO: Load the Sentinel-2 image with ID:
 //       'COPERNICUS/S2/20200624T031551_20200624T032157_T48QYD'
 //       Store it in a variable called 'image'.
 
 
-// TODO: Display the image as an RGB composite (B4, B3, B2) with
-//       min=500, max=2200. Give the layer a name.
-
+// Display an RGB composite. min/max are in the raw DN range (0–10000).
+// Bands B4=Red, B3=Green, B2=Blue.
+Map.addLayer(image, {min: 500, max: 2200, bands: ['B4', 'B3', 'B2']}, 'RGB');
 
 // TODO: Print the image object to the Console.
 
